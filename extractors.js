@@ -6,9 +6,12 @@ const DEFAULT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
 const client = axios.create({
-  timeout: 20000,
+  timeout: 30000,
   headers: {
     "User-Agent": DEFAULT_UA,
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
   },
 });
 
@@ -584,7 +587,7 @@ async function extractGDMirrorbot(url, referer) {
   return { streams, subtitles };
 }
 
-async function invokeExtractor(url, referer = "https://animedekho.app") {
+async function invokeExtractor(url, referer = "https://animedekho.tv") {
   if (!url) return { streams: [], subtitles: [] };
   const lower = url.toLowerCase();
 

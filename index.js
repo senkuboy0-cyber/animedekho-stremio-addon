@@ -4,7 +4,7 @@ const cors = require("cors");
 const cheerio = require("cheerio");
 const { client, DEFAULT_UA, invokeExtractor } = require("./extractors");
 
-const MAIN_URL = "https://animedekho.app";
+const MAIN_URL = "https://animedekho.tv";
 const ID_PREFIX = "animedekho:";
 
 const TMDB_API = "https://api.themoviedb.org/3";
@@ -16,14 +16,11 @@ const CATALOG_MAP = {
   "animedekho-movies": { type: "movie", mode: "movie", path: "/movie-hindi/" },
   "animedekho-anime": { type: "series", mode: "category", term: "anime" },
   "animedekho-cartoon": { type: "series", mode: "category", term: "cartoon" },
-  "animedekho-hindi": { type: "series", mode: "category", term: "hindi-dub" },
-  "animedekho-tamil": { type: "series", mode: "category", term: "tamil" },
-  "animedekho-telugu": { type: "series", mode: "category", term: "telugu" },
 };
 
 const manifest = {
   id: "com.senkuboy.animedekho",
-  version: "1.0.0",
+  version: "1.1.0",
   name: "Toonify Stream",
   description:
     "Watch Hindi, Tamil, Telugu Dubbed Anime, Cartoons, Series & Movies from AnimeDekho",
@@ -62,26 +59,17 @@ const manifest = {
       name: "Toonify - Cartoon",
       extra: [{ name: "skip", isRequired: false }],
     },
-    {
-      type: "series",
-      id: "animedekho-hindi",
-      name: "Toonify - Hindi Dub",
-      extra: [{ name: "skip", isRequired: false }],
-    },
-    {
-      type: "series",
-      id: "animedekho-tamil",
-      name: "Toonify - Tamil",
-      extra: [{ name: "skip", isRequired: false }],
-    },
-    {
-      type: "series",
-      id: "animedekho-telugu",
-      name: "Toonify - Telugu",
-      extra: [{ name: "skip", isRequired: false }],
-    },
   ],
 };
+
+function fixUrl(url) {
+  if (!url) return "";
+  const trimmed = String(url).trim();
+  if (!trimmed || trimmed.startsWith("data:image")) return "";
+  if (trimmed.startsWith("//")) return `https:${trimmed}`;
+  if (trimmed.startsWith("/")) return `${MAIN_URL}${trimmed}`;
+  return trimmed;
+}
 
 function encodeId(payload) {
   return (
@@ -98,8 +86,14 @@ function cleanTitle(raw) {
   if (!raw) return "";
   return raw
     .replace(/^Watch Online\s+/i, "")
-    .replace(/\s+Movie in Hindi Dubbed Free.*$/i, "")
-    .replace(/\s*\|\s*AnimeDekho.*$/i, "")
+    .replace(/\s+Anime\s*$/i, "")
+    .replace(/\s*Movie\s*\(.*Dubbed.*\).*$/i, "")
+    .split(" Movie in Hindi")[0]
+    .split(" Series in Hindi")[0]
+    .split(" in Hindi")[0]
+    .split(" Hindi Dubbed")[0]
+    .split(" | AnimeDekho")[0]
+    .split("| AnimeDekho")[0]
     .replace(/^AnimeDekho\s*[-–]\s*/i, "")
     .trim();
 }
@@ -133,7 +127,9 @@ async function fetchTmdbDetails($, title, isSeries) {
     const imgRes = await client.get(
       `${TMDB_API}/${mediaType}/${tmdbId}/images?api_key=${TMDB_KEY}&include_image_language=en,null`
     );
-    const logos = imgRes.data?.logos || [];
+    const logos = (imgRes.data?.logos || []).filter(
+      (l) => !String(l.file_path || "").toLowerCase().endsWith(".svg")
+    );
     const backdrops = imgRes.data?.backdrops || [];
 
     const bestLogo =
@@ -151,35 +147,40 @@ async function fetchTmdbDetails($, title, isSeries) {
   }
 }
 
-function parseArticle($, el, fallbackType = "series") {
+function parseArticle($, el, catalogType = "series") {
   const $el = $(el);
-  const href =
+  const rawHref =
     $el.find("a.lnk-blk").attr("href") || $el.find("a").first().attr("href");
+  const href = fixUrl(rawHref);
   if (!href) return null;
 
-  let poster = $el.find("div figure img, figure img").attr("src") || "";
-  if (poster.includes("data:image")) {
-    poster =
-      $el.find("div figure img, figure img").attr("data-lazy-src") || poster;
-  }
+  const $img = $el.find("div figure img, figure img, img").first();
+  const poster =
+    fixUrl($img.attr("data-lazy-src")) ||
+    fixUrl($img.attr("data-src")) ||
+    fixUrl($img.attr("src"));
 
-  const imgAlt = ($el.find("div figure img").attr("alt") || "").trim();
+  const imgAlt = ($img.attr("alt") || "").trim();
   const h2Text = ($el.find("header h2, h2.entry-title, h2").text() || "").trim();
 
-  let title = h2Text;
+  let title = "";
   if (imgAlt && imgAlt.length > 2 && !imgAlt.toLowerCase().includes("anime")) {
     title = imgAlt;
-  } else if (!title || title.toLowerCase().includes("animedekho")) {
+  } else if (
+    h2Text &&
+    h2Text.length > 2 &&
+    !h2Text.toLowerCase().includes("animedekho")
+  ) {
+    title = h2Text;
+  } else {
     const slug = href.replace(/\/+$/, "").split("/").pop() || "Unknown";
     title = slug.replace(/-/g, " ");
+    title = title.charAt(0).toUpperCase() + title.slice(1);
   }
 
-  const isMovie = href.includes("/movie") || fallbackType === "movie";
-  const itemType = isMovie ? "movie" : "series";
-
   return {
-    id: encodeId({ url: href, poster, type: itemType }),
-    type: itemType,
+    id: encodeId({ url: href, poster, type: catalogType }),
+    type: catalogType,
     name: cleanTitle(title) || title,
     poster: poster || undefined,
   };
@@ -196,7 +197,10 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
       });
       const $ = cheerio.load(res.data);
       const metas = [];
-      $("ul[data-results] li article, article").each((_, el) => {
+      let elements = $("ul[data-results] li article");
+      if (elements.length === 0) elements = $("article");
+
+      elements.each((_, el) => {
         const item = parseArticle($, el, type);
         if (item) metas.push(item);
       });
@@ -216,7 +220,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
       const $ = cheerio.load(res.data);
       const metas = [];
       $("article").each((_, el) => {
-        const item = parseArticle($, el, cat.type);
+        const item = parseArticle($, el, type);
         if (item) metas.push(item);
       });
       return { metas };
@@ -228,7 +232,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
       const $ = cheerio.load(res.data);
       const metas = [];
       $("article").each((_, el) => {
-        const item = parseArticle($, el, cat.type);
+        const item = parseArticle($, el, type);
         if (item) metas.push(item);
       });
       return { metas };
@@ -237,7 +241,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     const pageRes = await client.get(pageUrl, { headers: { Referer: MAIN_URL } });
     const pageHtml = pageRes.data;
     const $page = cheerio.load(pageHtml);
-    const nonce = /"nonce":"([^"]+)"/.exec(pageHtml)?.[1] || "";
+    const nonce = /"nonce"\s*:\s*"([^"]+)"/.exec(pageHtml)?.[1] || "";
     const filterEl = $page("[data-taxonomy]").first();
     const taxonomy = filterEl.attr("data-taxonomy") || "none";
     const termVal = filterEl.attr("data-term") || "none";
@@ -279,16 +283,17 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     const $ajax = cheerio.load(ajaxJson?.html || "");
     const metas = [];
     $ajax("article").each((_, el) => {
-      const item = parseArticle($ajax, el, cat.type);
+      const item = parseArticle($ajax, el, type);
       if (item) metas.push(item);
     });
     return { metas };
   } catch (err) {
+    console.error("Catalog error:", err.message);
     return { metas: [] };
   }
 });
 
-builder.defineMetaHandler(async ({ id }) => {
+builder.defineMetaHandler(async ({ type, id }) => {
   try {
     const media = decodeId(id);
     const res = await client.get(media.url, {
@@ -302,14 +307,16 @@ builder.defineMetaHandler(async ({ id }) => {
     const rawTitle =
       cleanTitle($("h1.entry-title").text()) ||
       cleanTitle($('meta[property="og:title"]').attr("content")) ||
+      cleanTitle($("title").text()) ||
       "Unknown Title";
 
-    let poster =
-      $("div.post-thumbnail figure img").attr("src") || media.poster || "";
-    if (poster.includes("data:image")) {
-      poster =
-        $("div.post-thumbnail figure img").attr("data-lazy-src") || media.poster;
-    }
+    const $thumb = $("div.post-thumbnail figure img").first();
+    const poster =
+      fixUrl($thumb.attr("data-lazy-src")) ||
+      fixUrl($thumb.attr("data-src")) ||
+      fixUrl($thumb.attr("src")) ||
+      media.poster ||
+      "";
 
     const description =
       $("div.entry-content p").first().text().trim() ||
@@ -326,6 +333,30 @@ builder.defineMetaHandler(async ({ id }) => {
     const tmdb = await fetchTmdbDetails($, rawTitle, isSeries);
 
     if (!isSeries) {
+      if (type === "series") {
+        return {
+          meta: {
+            id,
+            type: "series",
+            name: rawTitle,
+            poster,
+            background: tmdb.backdrop || poster,
+            logo: tmdb.logo || undefined,
+            description,
+            releaseInfo: yearText || undefined,
+            videos: [
+              {
+                id: encodeId({ url: media.url, mediaType: 1 }),
+                title: rawTitle,
+                season: 1,
+                episode: 1,
+                thumbnail: poster || undefined,
+              },
+            ],
+          },
+        };
+      }
+
       return {
         meta: {
           id,
@@ -341,9 +372,11 @@ builder.defineMetaHandler(async ({ id }) => {
     }
 
     const videos = [];
+    const seasonCounters = {};
+
     episodeEls.each((idx, el) => {
       const $li = $(el);
-      const href = $li.find("a").attr("href");
+      const href = fixUrl($li.find("a").attr("href"));
       if (!href) return;
 
       const epTitle =
@@ -351,29 +384,31 @@ builder.defineMetaHandler(async ({ id }) => {
         `Episode ${idx + 1}`;
       const spanText = $li.find("h3.title > span").text().trim();
       const seasonMatch = /S(\d+)/i.exec(spanText);
-      const epMatch = /-(\d+)/.exec(spanText) || /E(\d+)/i.exec(spanText);
-
       const season = seasonMatch ? parseInt(seasonMatch[1], 10) : 1;
-      const episode = epMatch ? parseInt(epMatch[1], 10) : idx + 1;
 
-      let thumb = $li.find("figure img").attr("src") || poster;
-      if (thumb && thumb.includes("data:image")) {
-        thumb = $li.find("figure img").attr("data-lazy-src") || poster;
-      }
+      seasonCounters[season] = (seasonCounters[season] || 0) + 1;
+      const episode = seasonCounters[season];
+
+      const $epImg = $li.find("figure img").first();
+      const thumb =
+        fixUrl($epImg.attr("data-lazy-src")) ||
+        fixUrl($epImg.attr("data-src")) ||
+        fixUrl($epImg.attr("src")) ||
+        poster;
 
       videos.push({
         id: encodeId({ url: href, mediaType: 2 }),
         title: epTitle,
         season,
         episode,
-        thumbnail: thumb,
+        thumbnail: thumb || undefined,
       });
     });
 
     return {
       meta: {
         id,
-        type: "series",
+        type: type || "series",
         name: rawTitle,
         poster,
         background: tmdb.backdrop || poster,
@@ -384,6 +419,7 @@ builder.defineMetaHandler(async ({ id }) => {
       },
     };
   } catch (err) {
+    console.error("Meta error:", err.message);
     return { meta: null };
   }
 });
@@ -409,7 +445,7 @@ builder.defineStreamHandler(async ({ id }) => {
 
     // 1. Standard servers (iframe.serversel[src])
     $("iframe.serversel[src]").each((_, el) => {
-      const serverUrl = $(el).attr("src");
+      const serverUrl = fixUrl($(el).attr("src"));
       if (serverUrl) {
         extractorPromises.push(
           (async () => {
@@ -418,7 +454,9 @@ builder.defineStreamHandler(async ({ id }) => {
                 headers: { Referer: media.url },
               });
               const $inner = cheerio.load(innerRes.data);
-              const innerIframeUrl = $inner("iframe[src]").first().attr("src");
+              const innerIframeUrl = fixUrl(
+                $inner("iframe[src]").first().attr("src")
+              );
               if (innerIframeUrl) {
                 return await invokeExtractor(innerIframeUrl, media.url);
               }
@@ -442,7 +480,7 @@ builder.defineStreamHandler(async ({ id }) => {
                 headers: { Referer: media.url },
               });
               const $tr = cheerio.load(trRes.data);
-              const iframeUrl = $tr("iframe").first().attr("src");
+              const iframeUrl = fixUrl($tr("iframe").first().attr("src"));
               if (iframeUrl) {
                 return await invokeExtractor(iframeUrl, media.url);
               }
@@ -492,12 +530,35 @@ builder.defineStreamHandler(async ({ id }) => {
 
     return { streams: allStreams };
   } catch (err) {
+    console.error("Stream error:", err.message);
     return { streams: [] };
   }
 });
 
 const app = express();
 app.use(cors());
+
+app.get("/debug", async (req, res) => {
+  try {
+    const response = await client.get(`${MAIN_URL}/series-hindi/`, {
+      headers: { Referer: MAIN_URL },
+    });
+    const $ = cheerio.load(response.data);
+    const count = $("article").length;
+    res.json({
+      status: "ok",
+      mainUrl: MAIN_URL,
+      httpStatus: response.status,
+      articlesFound: count,
+    });
+  } catch (err) {
+    res.status(500).json({
+      status: "error",
+      mainUrl: MAIN_URL,
+      message: err.message,
+    });
+  }
+});
 
 const addonInterface = builder.getInterface();
 app.use("/", getRouter(addonInterface));
